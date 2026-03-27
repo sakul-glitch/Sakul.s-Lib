@@ -1,0 +1,7 @@
+schtasks example to schedule daily backup at 03:00 as the current user:
+
+schtasks /Create /SC DAILY /TN "CLPG_BackupToGDrive" /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Thomas\Desktop\clpg\backup_to_gdrive.ps1"" /ST 03:00 /F
+
+Notes:
+- Run this from an elevated command prompt if necessary.
+- Adjust the time (/ST) and task name (/TN) as desired.

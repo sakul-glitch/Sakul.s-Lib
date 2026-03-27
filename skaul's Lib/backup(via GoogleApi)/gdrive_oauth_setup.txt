@@ -1,0 +1,18 @@
+Google Cloud Console - OAuth Client (Desktop) Setup
+
+1. Open https://console.cloud.google.com and create or select a project.
+2. In the left menu go to "APIs & Services" -> "OAuth consent screen" and configure an External or Internal consent screen. For personal use, External is fine.
+3. Under "Credentials" click "Create Credentials" -> "OAuth client ID".
+   - Application type: Desktop app
+   - Name: CLPG Backup Client
+4. After creation, copy the Client ID and Client Secret. Save them in a file named client_credentials.json with structure:
+{
+  "client_id": "YOUR_CLIENT_ID",
+  "client_secret": "YOUR_CLIENT_SECRET"
+}
+Save that file to: C:\Users\Thomas\Desktop\clpg\client_credentials.json
+
+Notes:
+- The script uses the Authorization Code flow with redirect URI urn:ietf:wg:oauth:2.0:oob. If needed, use a localhost redirect and paste the returned code.
+- Use scope: https://www.googleapis.com/auth/drive.file (recommended) or https://www.googleapis.com/auth/drive (full access).
+- After initial auth, the script stores a refresh_token locally (encrypted with Windows DPAPI). Keep that file secure.
