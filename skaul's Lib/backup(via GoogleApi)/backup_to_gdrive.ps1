@@ -6,20 +6,21 @@ Run once interactively to perform initial OAuth and store refresh_token.
 #>
 
 # Configuration - edit these
-$SourcePath = "C:\Path\To\Source"        # <-- set source folder to backup
-$LogDir = "C:\Users\Thomas\Desktop\clpg\logs"
-$TokenFile = "C:\Users\Thomas\Desktop\clpg\token.enc"
-$ClientCredFile = "C:\Users\Thomas\Desktop\clpg\client_credentials.json" # optional file with client_id and client_secret
+# Path to the local folder you want to back up (set to the project's `game` folder by default)
+$SourcePath = "d:\Lukas\Stuff\clpg\game"
+# Paths for logs, token and client credentials (uses current user profile)
+$LogDir = Join-Path $env:USERPROFILE "Desktop\clpg\logs"
+$TokenFile = Join-Path $env:USERPROFILE "Desktop\clpg\token.enc"
+$ClientCredFile = Join-Path $env:USERPROFILE "Desktop\clpg\client_credentials.json" # optional file with client_id and client_secret
 $UploadFolderName = "CLPG_Backups"  # folder name in Drive where files will be placed
 $MultipartThresholdBytes = 5MB
-$MaxRetries = 5
 
 # End configuration
 
 if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir | Out-Null }
 $LogFile = Join-Path $LogDir ("backup_{0:yyyyMMdd_HHmmss}.log" -f (Get-Date))
 
-. "C:\Users\Thomas\Desktop\clpg\token_store_helper.ps1" 2>$null
+. "C:\Users\%user%\Desktop\clpg\token_store_helper.ps1" 2>$null
 
 function Write-Log { param($msg) $t = Get-Date -Format "yyyy-MM-dd HH:mm:ss"; "[$t] $msg" | Tee-Object -FilePath $LogFile -Append }
 
@@ -93,6 +94,44 @@ function Ensure-DriveFolder {
     return $create.id
 }
 
+# Cache for folder lookups: key = parentId|folderName -> folderId
+$DriveFolderCache = @{}
+
+function Get-OrCreate-DriveFolder {
+    param($accessToken, $parentId, $folderName)
+    $key = "$parentId|$folderName"
+    if ($DriveFolderCache.ContainsKey($key)) { return $DriveFolderCache[$key] }
+
+    $headers = @{ Authorization = "Bearer $accessToken" }
+    $q = "name = '$folderName' and mimeType = 'application/vnd.google-apps.folder' and '$parentId' in parents and trashed = false"
+    $uri = "https://www.googleapis.com/drive/v3/files?q=$( [System.Web.HttpUtility]::UrlEncode($q) )&fields=files(id,name)"
+    try {
+        $res = Invoke-RestMethod -Headers $headers -Uri $uri -Method Get -ErrorAction Stop
+        if ($res.files.Count -gt 0) { $DriveFolderCache[$key] = $res.files[0].id; return $res.files[0].id }
+    } catch {
+        # ignore and try to create
+    }
+
+    $meta = @{ name = $folderName; mimeType = 'application/vnd.google-apps.folder'; parents = @($parentId) } | ConvertTo-Json
+    $create = Invoke-RestMethod -Uri 'https://www.googleapis.com/drive/v3/files' -Headers $headers -Method Post -Body $meta -ContentType 'application/json'
+    $DriveFolderCache[$key] = $create.id
+    return $create.id
+}
+
+function Ensure-DrivePath {
+    param($accessToken, $rootId, $relativePath)
+    if (-not $relativePath) { return $rootId }
+    # Normalize separators and split
+    $relativePath = $relativePath -replace '/','\\'
+    $parts = $relativePath -split '\\+'
+    $current = $rootId
+    foreach ($p in $parts) {
+        if ([string]::IsNullOrWhiteSpace($p)) { continue }
+        $current = Get-OrCreate-DriveFolder -accessToken $accessToken -parentId $current -folderName $p
+    }
+    return $current
+}
+
 function Upload-Multipart {
     param($accessToken, $filePath, $parentId)
     $metadata = @{ name = [System.IO.Path]::GetFileName($filePath); parents = @($parentId) } | ConvertTo-Json
@@ -116,7 +155,7 @@ function Upload-Multipart {
         $resp = Invoke-RestMethod -Uri "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart" -Headers $headers -Method Post -InFile $ms -ContentType "multipart/related; boundary=$boundary"
         Write-Log "Uploaded (multipart): $filePath -> $($resp.id)"
     } catch {
-        Write-Log "Multipart upload failed for $filePath: $_"
+        Write-Log "Multipart upload failed for $filePath: ${_}"
         throw $_
     }
 }
@@ -156,14 +195,24 @@ try {
     if (-not $accessToken) { Write-Log "Failed to obtain access token"; exit 3 }
     $parentId = Ensure-DriveFolder -accessToken $accessToken -folderName $UploadFolderName
 
+    # Build list of files to upload
     $files = Get-ChildItem -Path $SourcePath -File -Recurse
     foreach ($f in $files) {
         try {
             $full = $f.FullName
-            if ($f.Length -lt $MultipartThresholdBytes) {
-                Upload-Multipart -accessToken $accessToken -filePath $full -parentId $parentId
+            # Compute relative directory inside the source folder
+            $rel = $full.Substring($SourcePath.Length).TrimStart('\','/')
+            $relDir = [System.IO.Path]::GetDirectoryName($rel)
+            if ($relDir) {
+                $targetParentId = Ensure-DrivePath -accessToken $accessToken -rootId $parentId -relativePath $relDir
             } else {
-                Upload-Resumable -accessToken $accessToken -filePath $full -parentId $parentId
+                $targetParentId = $parentId
+            }
+
+            if ($f.Length -lt $MultipartThresholdBytes) {
+                Upload-Multipart -accessToken $accessToken -filePath $full -parentId $targetParentId
+            } else {
+                Upload-Resumable -accessToken $accessToken -filePath $full -parentId $targetParentId
             }
         } catch {
             Write-Log "Failed to upload $($f.FullName): $_"
